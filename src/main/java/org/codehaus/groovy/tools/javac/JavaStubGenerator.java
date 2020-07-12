@@ -56,7 +56,6 @@ import org.objectweb.asm.Opcodes;
 
 import javax.tools.FileObject;
 import javax.tools.JavaFileObject;
-import java.io.BufferedOutputStream;
 import java.io.File;
 import java.io.FileNotFoundException;
 import java.io.FileOutputStream;
@@ -75,7 +74,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 import static org.apache.groovy.ast.tools.ConstructorNodeUtils.getFirstIfSpecialConstructorCall;
 import static org.codehaus.groovy.ast.tools.GenericsUtils.correctToGenericsSpec;
@@ -134,10 +133,7 @@ public class JavaStubGenerator {
     }
 
     private void generateMemStub(ClassNode classNode) {
-        Writer writer = new StringBuilderWriter();
-        generateStubContent(classNode, writer);
-
-        javaStubCompilationUnitSet.add(new MemJavaFileObject(classNode, writer.toString()));
+        javaStubCompilationUnitSet.add(new MemJavaFileObject(classNode, generateStubContent(classNode)));
     }
 
     private void generateFileStub(ClassNode classNode) throws FileNotFoundException {
@@ -147,37 +143,38 @@ public class JavaStubGenerator {
         File file = createJavaStubFile(fileName);
 
         Writer writer = new OutputStreamWriter(
-                new BufferedOutputStream(
-                        new FileOutputStream(file),
-                        DEFAULT_BUFFER_SIZE
-                ),
+                new FileOutputStream(file),
                 Charset.forName(encoding)
         );
-        if (classNode.getNameWithoutPackage().equals("package-info")) {
-            // should just output the package statement
-            try (PrintWriter out = new PrintWriter(writer)) {
-                printPackage(out, classNode);
-            }
-        } else {
-            generateStubContent(classNode, writer);
+
+        try (PrintWriter out = new PrintWriter(writer)) {
+            out.print(generateStubContent(classNode));
         }
 
         javaStubCompilationUnitSet.add(new RawJavaFileObject(createJavaStubFile(fileName).toPath().toUri()));
     }
 
-    private void generateStubContent(ClassNode classNode, Writer writer) {
+    private String generateStubContent(ClassNode classNode) {
+        Writer writer = new StringBuilderWriter(DEFAULT_BUFFER_SIZE);
+
         try (PrintWriter out = new PrintWriter(writer)) {
             printPackage(out, classNode);
-            printImports(out, classNode);
-            printClassContents(out, classNode);
+
+            // should just output the package statement for `package-info` class node
+            if (!"package-info".equals(classNode.getNameWithoutPackage())) {
+                printImports(out, classNode);
+                printClassContents(out, classNode);
+            }
         }
+
+        return writer.toString();
     }
 
     private void printPackage(PrintWriter out, ClassNode classNode) {
         String packageName = classNode.getPackageName();
         if (packageName != null) {
             printAnnotations(out, classNode.getPackage());
-            out.println("package " + packageName + ";\n");
+            out.println("package " + packageName + ";");
         }
     }
 
@@ -380,10 +377,10 @@ public class JavaStubGenerator {
                 // skip values() method and valueOf(String)
                 String name = method.getName();
                 Parameter[] params = method.getParameters();
-                if (name.equals("values") && params.length == 0) continue;
-                if (name.equals("valueOf") &&
-                        params.length == 1 &&
-                        params[0].getType().equals(ClassHelper.STRING_TYPE)) {
+                if (params.length == 0 && name.equals("values")) continue;
+                if (params.length == 1
+                        && name.equals("valueOf")
+                        && params[0].getType().equals(ClassHelper.STRING_TYPE)) {
                     continue;
                 }
             }
@@ -463,8 +460,9 @@ public class JavaStubGenerator {
         boolean isInterface = isInterfaceOrTrait(classNode);
         List<FieldNode> fields = classNode.getFields();
         if (fields == null) return;
-        List<FieldNode> enumFields = new ArrayList<FieldNode>(fields.size());
-        List<FieldNode> normalFields = new ArrayList<FieldNode>(fields.size());
+        final int fieldCnt = fields.size();
+        List<FieldNode> enumFields = new ArrayList<FieldNode>(fieldCnt);
+        List<FieldNode> normalFields = new ArrayList<FieldNode>(fieldCnt);
         for (FieldNode field : fields) {
             boolean isSynthetic = (field.getModifiers() & Opcodes.ACC_SYNTHETIC) != 0;
             if (field.isEnum()) {
@@ -1038,8 +1036,12 @@ public class JavaStubGenerator {
     }
 
     public void clean() {
-        // DON'T replace `collect(Collectors.counting())` with `count()` here, otherwise peek will NOT be triggered
-        javaStubCompilationUnitSet.stream().peek(FileObject::delete).collect(Collectors.counting());
+        Stream<JavaFileObject> javaFileObjectStream =
+                javaStubCompilationUnitSet.size() < 2
+                        ? javaStubCompilationUnitSet.stream()
+                        : javaStubCompilationUnitSet.parallelStream();
+
+        javaFileObjectStream.forEach(FileObject::delete);
         javaStubCompilationUnitSet.clear();
     }
 
